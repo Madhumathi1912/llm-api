@@ -1,0 +1,33 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Overrides the .env default of "localhost" — inside Docker Compose's
+      # network, containers reach each other by SERVICE NAME, not localhost.
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    env_file:
+      - .env  # still pulls OPENAI_API_KEY_ and OPENAI_MODEL from here
+    depends_on:
+      - redis
+      - qdrant
+
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"  # exposed to your host machine too, so you can redis-cli in from outside if needed
+  
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"  # REST API + built-in web dashboard (http://localhost:6333/dashboard)
+      - "6334:6334"  # gRPC API (faster, used internally by the Python client for bulk ops)
+    volumes:
+      - qdrant_storage:/qdrant/storage  # persists data across container restarts
+
+volumes:
+  qdrant_storage:
