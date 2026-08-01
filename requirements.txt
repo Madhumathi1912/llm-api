@@ -9,3 +9,4 @@ qdrant-client
 pypdf
 python-multipart
 python-docx
+pytest

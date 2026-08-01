@@ -23,3 +23,19 @@ class ReviewAnalysisResponse(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     cached: bool
+
+class ConversationChatRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, examples=["My name is Madhu."])
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Omit this on the FIRST message to start a new conversation — "
+                    "the response will include a session_id to reuse on follow-up messages.",
+    )
+
+class ConversationChatResponse(BaseModel):
+    session_id: str
+    response: str
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    message_count: int  # how many messages are currently stored for this session

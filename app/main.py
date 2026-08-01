@@ -6,7 +6,7 @@ logging.basicConfig(
 )
 
 from fastapi import FastAPI
-from app.routers import chat, rag
+from app.routers import chat, rag, tools
 
 app = FastAPI(
     title="LLM API",
@@ -16,6 +16,7 @@ app = FastAPI(
 
 app.include_router(chat.router, prefix="/chat", tags=["Chat"])
 app.include_router(rag.router, prefix="/rag", tags=['RAG'])
+app.include_router(tools.router, prefix="/chat/tools", tags=["Tools"])
 
 @app.get('/health', tags=["Health"])
 async def health_check():

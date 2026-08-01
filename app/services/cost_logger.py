@@ -147,3 +147,61 @@ cost_logger = CostLogger(
     pricing_calculator=PricingCalculator(),
     repository=UsageRepository(),
 )
+
+
+class BudgetExceededError(Exception):
+    """
+    Raised when a request would exceed the configured spending limit.
+    A distinct exception type so routers can catch it specifically and
+    return a clear, actionable HTTP response — different from an
+    OpenAIError, which is a provider-side failure.
+    """
+    def __init__(self, limit: float, current_spend: float):
+        self.limit = limit
+        self.current_spend = current_spend
+        super().__init__(
+            f"Daily budget of ${limit:.4f} exceeded (current spend: ${current_spend:.4f})"
+        )
+
+
+class BudgetEnforcer:
+    """
+    Deciding whether spending is within limits.
+    Depends only on UsageRepository (to read current spend).
+    """
+
+    def __init__(self, repository: UsageRepository, daily_limit_usd: float):
+        self._repository = repository
+        self._daily_limit_usd = daily_limit_usd
+
+    def _start_of_today_utc(self) -> str:
+        now = datetime.now(timezone.utc)
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return start_of_day.isoformat()
+
+    def check_budget(self) -> None:
+        """
+        Raises BudgetExceededError if today's spend already meets/exceeds
+        the daily limit. Call this BEFORE making an OpenAI call.
+        """
+        current_spend = self._repository.total_cost_since(self._start_of_today_utc())
+        if current_spend >= self._daily_limit_usd:
+            raise BudgetExceededError(limit=self._daily_limit_usd, current_spend=current_spend)
+
+    def get_today_spend(self) -> float:
+        """Exposed for the /usage/summary endpoint."""
+        return self._repository.total_cost_since(self._start_of_today_utc())
+
+    @property
+    def daily_limit_usd(self) -> float:
+        """Public read-only access to the configured limit."""
+        return self._daily_limit_usd
+
+
+# Single shared instance. daily_limit_usd is intentionally hardcoded here
+# for simplicity — a natural next upgrade is reading this from Settings
+# (app/config.py) as an env var, so it's configurable without code changes.
+budget_enforcer = BudgetEnforcer(
+    repository=UsageRepository(),
+    daily_limit_usd=1.00,  # adjust to whatever makes sense for your testing
+)

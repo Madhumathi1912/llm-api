@@ -1,15 +1,19 @@
 import logging
+import uuid
 
 from openai import OpenAI, OpenAIError
 from app.config import settings
 from app.schemas.models import ReviewAnalysisResponse
 from app.services.openai_client import openai_client
 from app.services.cache_client import cache_client
-from app.services.cost_logger import cost_logger
+from app.services.cost_logger import cost_logger, budget_enforcer, BudgetExceededError
+from app.services.conversation_store import conversation_store
 
 logger = logging.getLogger(__name__)
 
 client = OpenAI(api_key=settings.openai_api_key_)
+
+SYSTEM_PROMPT = "You are a helpful assistant."
 
 class LLMService:
 
@@ -115,3 +119,61 @@ class LLMService:
             cache_client.set(cache_key, result)
 
         return result
+
+
+    def ask_with_memory(prompt: str, session_id: str = None) -> dict:
+        """
+        Multi-turn conversation: builds the message list for this turn
+        (system prompt + running summary, if any + recent raw messages),
+        sends it to OpenAI, then records this turn — which may trigger
+        older messages being folded into the summary if the sliding
+        window is exceeded (see ConversationStore).
+    
+        If session_id is None, a new one is generated — the caller should
+        reuse the returned session_id on subsequent messages to continue
+        the same conversation.
+        """
+        if not session_id:
+            session_id = str(uuid.uuid4())
+
+        messages_for_call = conversation_store.build_messages_for_call(session_id, SYSTEM_PROMPT)
+        user_message = {"role": "user", "content": prompt}
+
+        try:
+            budget_enforcer.check_budget()
+        except BudgetExceededError as e:
+            raise e
+
+        try:
+            completion = openai_client.create_completion(
+                model=settings.openai_model,
+                messages=messages_for_call  + [user_message],  # full history + new message
+                temperature=0.7,
+                max_tokens=300,
+            )
+        except OpenAIError as e:
+            raise e
+
+        assistant_reply = completion.choices[0].message.content
+        usage = completion.usage
+
+        assistant_message = {"role": "assistant", "content": assistant_reply}
+
+        updated_data = conversation_store.record_turn(session_id, user_message, assistant_message)
+
+        cost_logger.log_usage(
+            endpoint="/chat/conversation",
+            model=completion.model,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            cached=False,
+        )
+
+        return {
+            "session_id": session_id,
+            "response": assistant_reply,
+            "model": completion.model,
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "message_count": len(updated_data['messages']),
+        }
