@@ -2,12 +2,13 @@
 
 A FastAPI service that wraps the OpenAI API with production-oriented patterns:
 retries with backoff, response caching, cost tracking with budget enforcement,
-and a full Retrieval-Augmented Generation (RAG) pipeline backed by a Qdrant
-vector database. Fully containerized with Docker Compose.
+multi-turn conversation memory, function calling, and a full
+Retrieval-Augmented Generation (RAG) pipeline backed by a Qdrant vector
+database. Fully containerized with Docker Compose.
 
 Built as a hands-on learning project to explore LLM application development
-beyond a single API call — reliability patterns, vector search, and clean
-service-layer architecture.
+beyond a single API call — reliability patterns, vector search, agentic
+tool use, and clean service-layer architecture.
 
 ## Features
 
@@ -15,6 +16,16 @@ service-layer architecture.
   Completions API
 - **Structured outputs** — schema-enforced LLM responses (Pydantic models,
   not free-text parsing) for tasks like sentiment analysis
+- **Conversation memory** — multi-turn chat with session-based history
+  - Sliding window keeps recent messages verbatim
+  - Older messages are automatically folded into a running summary
+    (via a second LLM call) instead of being dropped outright, once the
+    window is exceeded
+  - Backed by Redis, with a TTL so abandoned sessions expire
+- **Function calling / tool use** — the model can request a real function
+  call (e.g. `get_order_status`) with structured arguments; the API executes
+  the real Python function and returns the result for a grounded final answer
+  - Handles both paths: model answers directly, or requests a tool first
 - **Retrieval-Augmented Generation (RAG)**
   - Document ingestion from raw text or uploaded files (`.txt`, `.pdf`, `.docx`)
   - Automatic chunking, embedding (OpenAI `text-embedding-3-small`), and
@@ -30,9 +41,18 @@ service-layer architecture.
     per-model pricing
   - Configurable daily spending limit — requests are rejected (`429`) once
     the limit is reached
+- **Testing**
+  - Unit tests (`pytest`) covering the deterministic pieces: chunking logic,
+    conversation sliding-window/summarization triggering, function-call
+    dispatch and two-step orchestration, and retry behavior — all mocked,
+    no real API/Redis calls
+  - Evals (separate from unit tests) for the non-deterministic LLM-quality
+    side: retrieval correctness, answer faithfulness, and LLM-as-judge
+    scoring — see `evals/`
 - **Clean architecture**
   - Dependency-injected service classes (`OpenAIClient`, `EmbeddingClient`,
-    `VectorStore`, `Chunker`, `CostLogger`, `RagService`, etc.)
+    `VectorStore`, `Chunker`, `CostLogger`, `ConversationStore`,
+    `ToolCallingService`, `RagService`, etc.)
   - Each service owns one responsibility and depends only on the public
     interface of its collaborators — easy to unit test with mocks, easy to
     swap implementations (e.g. a different vector DB or LLM provider)
@@ -45,41 +65,47 @@ service-layer architecture.
                          │   (app)     │
                          └──────┬──────┘
                                 │
-        ┌───────────────────────┼───────────────────────┐
-        │                       │                       │
-┌───────▼─────────┐    ┌─────────▼──────────┐    ┌─────────▼────────┐
-│  OpenAIClient   │    │    RagService      │    │   CostLogger     │
-│  (retries via   │    │  (orchestrates     │    │  (SQLite usage   │
-│   tenacity)     │    │   ingestion & Q&A) │    │   + budgeting)   │
-└───────┬─────────┘    └─────┬───────┬──────┘    └──────────────────┘
-        │                    │       │
-        │           ┌────────▼──┐ ┌──▼───────────────┐
-        │           │ Chunker + │ │  VectorStore     │
-        │           │ Embedding │ │  (Qdrant client) │
-        │           │  Client   │ └────────┬─────────┘
-        │           └───────────┘          │
-        │                                  │
-┌───────▼─────────┐              ┌─────────▼───────────┐    ┌─────────────┐
-│   OpenAI API    │              │      Qdrant         │    │    Redis    │
-│ (chat + embed)  │              │  (vector database)  │    │  (caching)  │
-└─────────────────┘              └─────────────────────┘    └─────────────┘
+   ┌────────────┬───────────────┼───────────────┬────────────────┐
+   │            │               │               │                │
+┌──▼──────┐ ┌───▼────────┐ ┌────▼───────┐ ┌─────▼───────┐ ┌──────▼─────────┐
+│OpenAI   │ │RagService  │ │Conversation│ │ToolCalling  │ │  CostLogger    │
+│Client   │ │(chunk/embed│ │Store       │ │Service      │ │(SQLite usage + │
+│(retries)│ │/retrieve/  │ │(sliding    │ │(2-step tool │ │ budgeting)     │
+│         │ │ generate)  │ │window +    │ │ call flow)  │ │                │
+└──┬──────┘ └─┬────────┬─┘ │summarize)  │ └──────┬──────┘ └────────────────┘
+   │          │        │   └─────┬──────┘        │
+   │    ┌─────▼──┐ ┌───▼────┐    │           ┌───▼──────────┐
+   │    │Chunker+│ │VectorSt│    │           │OrderService  │
+   │    │Embed   │ │ore     │    │           │(demo tool    │
+   │    │Client  │ │(Qdrant)│    │           │ backend)     │
+   │    └────────┘ └───┬────┘    │           └──────────────┘
+   │                   │         │
+┌──▼──────┐      ┌─────▼───────┐ │
+│ OpenAI  │      │   Qdrant    │ └───────────┐
+│  API    │      │ (vectors)   │             │
+└─────────┘      └─────────────┘       ┌─────▼──────┐
+                                       │   Redis    │
+                                       │ (caching + │
+                                       │  sessions) │
+                                       └────────────┘
 ```
 
-Each box under `app` is a single-responsibility service class, constructed
-with its dependencies injected rather than importing globals directly —
-this keeps the business logic (`RagService`) decoupled from the
-infrastructure it depends on.
+Each service is a single-responsibility class, constructed with its
+dependencies injected rather than importing globals directly — this keeps
+business logic decoupled from the infrastructure it depends on, and makes
+mocking straightforward for unit tests.
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
 | API framework | FastAPI, Uvicorn |
-| LLM | OpenAI API (Chat Completions, Embeddings) |
+| LLM | OpenAI API (Chat Completions, Embeddings, Function Calling) |
 | Vector database | Qdrant |
-| Caching | Redis |
+| Caching & session store | Redis |
 | Cost tracking | SQLite |
 | Retry logic | Tenacity |
+| Testing | Pytest |
 | Containerization | Docker, Docker Compose |
 | Validation | Pydantic |
 
@@ -87,23 +113,38 @@ infrastructure it depends on.
 
 ```
 app/
-├── main.py                    # FastAPI app instance, router registration
-├── config.py                  # Environment-based settings (Pydantic Settings)
+├── main.py                        # FastAPI app instance, router registration
+├── config.py                      # Environment-based settings (Pydantic Settings)
 ├── routers/
-│   ├── chat.py                 # /chat/* endpoints
-│   └── rag.py                  # /rag/* endpoints (ingest, upload, ask)
+│   ├── chat.py                     # /chat/* endpoints (single-turn + conversation)
+│   ├── rag.py                       # /rag/* endpoints (ingest, upload, ask)
+│   └── tools.py                      # /chat/tools/* endpoint (function calling)
 ├── schemas/
-│   ├── chat.py                 # Request/response models for chat endpoints
-│   └── rag.py                  # Request/response models for RAG endpoints
+│   ├── models.py                     # Request/response models for chat + conversation
+│   ├── rag_model.py                       # Request/response models for RAG endpoints
+│   └── tool_model.py                      # Request/response models for tool-calling endpoint
 └── services/
-    ├── openai_client.py         # Retry-wrapped OpenAI chat completions client
-    ├── embedding_client.py       # Retry-wrapped OpenAI embeddings client
-    ├── vector_store.py           # Qdrant wrapper (storage + similarity search)
-    ├── chunking.py                # Text chunking (Chunker class)
-    ├── text_extractor.py          # File text extraction (.txt/.pdf/.docx)
-    ├── rag_service.py              # Orchestrates the full RAG pipeline
-    ├── cache_client.py              # Redis wrapper for response caching
-    └── cost_logger.py                # SQLite usage logging + budget enforcement
+    ├── openai_client.py             # Retry-wrapped OpenAI chat completions client
+    ├── embedding_client.py           # Retry-wrapped OpenAI embeddings client
+    ├── vector_store.py                # Qdrant wrapper (storage + similarity search)
+    ├── chunking.py                     # Text chunking (Chunker class)
+    ├── text_extractor.py                # File text extraction (.txt/.pdf/.docx)
+    ├── rag_service.py                    # Orchestrates the full RAG pipeline
+    ├── cache_client.py                    # Redis wrapper for response caching
+    ├── cost_logger.py                      # SQLite usage logging + budget enforcement
+    ├── conversation_store.py                # Redis-backed session history, sliding window
+    ├── conversation_summarizer.py             # Condenses overflow messages into a summary
+    ├── order_service.py                        # Demo backend for the function-calling tool
+    └── tool_calling_service.py                  # Two-step function-calling orchestration
+
+tests/                              # Unit tests (mocked, no real API/Redis calls)
+├── test_chunking.py
+├── test_conversation_store.py
+├── test_openai_client.py
+└── test_tool_calling_service.py
+
+evals/                              # LLM-quality evals (separate from unit tests)
+└── ...
 ```
 
 ## Setup
@@ -140,7 +181,7 @@ docker compose up --build
 
 This starts three services:
 - `app` — the FastAPI application (port `8000`)
-- `redis` — response cache (port `6379`)
+- `redis` — response cache + conversation session store (port `6379`)
 - `qdrant` — vector database (ports `6333`/`6334`, dashboard at `6333/dashboard`)
 
 ### 3. Open the interactive API docs
@@ -154,11 +195,30 @@ http://localhost:8000/docs
 | Method | Endpoint | Description |
 |---|---|---|
 | GET | `/health` | Health check |
-| POST | `/chat/` | Simple prompt → LLM response |
+| POST | `/chat/` | Single-turn prompt → LLM response (no memory) |
+| POST | `/chat/conversation` | Multi-turn chat with session-based memory |
+| POST | `/chat/tools/` | Chat with function-calling — model can call `get_order_status` |
 | GET | `/chat/usage/summary` | Today's estimated spend vs. daily budget |
 | POST | `/rag/documents/ingest` | Ingest raw text into the vector store |
 | POST | `/rag/documents/upload` | Upload a `.txt`/`.pdf`/`.docx` file to ingest |
 | POST | `/rag/ask` | Ask a question, answered using retrieved context |
+
+### Using conversation memory
+
+Omit `session_id` on your first message to start a new conversation — the
+response includes a `session_id` to reuse on every following message to
+continue the same conversation with full context.
+
+## Running Tests
+
+```bash
+pip install -r requirements.txt
+pytest tests/ -v
+```
+
+Unit tests cover deterministic logic only (chunking, sliding-window/
+summarization triggering, tool-call dispatch, retry behavior) using mocks —
+no real OpenAI, Redis, or Qdrant calls are made during test runs.
 
 ## Running Locally Without Docker
 
@@ -178,10 +238,15 @@ You'll need Redis and Qdrant running separately (e.g. via Docker) and
   bulleted/list-style content can occasionally be split across chunk
   boundaries, affecting retrieval for "list all X" style questions unless
   `top_k` is increased
-- No conversation memory yet — every request is single-turn/stateless
-- No streaming responses — replies are returned in full, not token-by-token
+- Conversation memory uses a message-count sliding window, not a
+  token-count based one — a natural refinement for more precise context
+  budgeting
+- No streaming responses yet — replies are returned in full, not
+  token-by-token
 - No authentication on the API itself
 - `.doc` (legacy binary Word format) is not supported — only `.docx`
+- Function calling currently supports a single demo tool
+  (`get_order_status`) backed by in-memory fake data
 
 ## License
 
