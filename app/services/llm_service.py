@@ -8,6 +8,7 @@ from app.services.openai_client import openai_client
 from app.services.cache_client import cache_client
 from app.services.cost_logger import cost_logger, budget_enforcer, BudgetExceededError
 from app.services.conversation_store import conversation_store
+from app.services.moderation_client import moderation_client, ContentFlaggedError
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +134,7 @@ class LLMService:
         reuse the returned session_id on subsequent messages to continue
         the same conversation.
         """
+        moderation_client.check(prompt)
         if not session_id:
             session_id = str(uuid.uuid4())
 

@@ -7,6 +7,8 @@ from app.services.vector_store import VectorStore, vector_store
 from app.services.chunking import Chunker, chunker
 from app.services.cost_logger import CostLogger, cost_logger
 from app.services.text_extractor import TextExtractor, text_extractor
+from app.services.moderation_client import moderation_client
+from app.services.tracer import tracer
 
 RAG_SYSTEM_PROMPT = (
     "You are a helpful assistant. Answer the user's question using ONLY "
@@ -77,20 +79,29 @@ class RagService:
         chunks, build an augmented prompt, and call the LLM to generate
         an answer grounded in that retrieved context.
         """
-        query_vector = self._embedding_client.embed(question)
-        retrieved_chunks = self._vector_store.search(query_vector, top_k)
-        augmented_prompt = self._build_augmented_prompt(question, retrieved_chunks)
+        # Check the question moderation(Given prompt is good prompt or violating the policy)
+        moderation_client.check(question)
+
+        trace_id = tracer.new_trace_id()
+        
+        with tracer.step(trace_id, "embed_question"):
+            query_vector = self._embedding_client.embed(question)
+        with tracer.step(trace_id, "vector_search", top_k=top_k):
+            retrieved_chunks = self._vector_store.search(query_vector, top_k)
+        with tracer.step(trace_id, "build_prompt", chunks_used=len(retrieved_chunks)):
+            augmented_prompt = self._build_augmented_prompt(question, retrieved_chunks)
 
         try:
-            completion = self._openai_client.create_completion(
-                model=settings.openai_model,
-                messages=[
-                    {"role": "system", "content": RAG_SYSTEM_PROMPT},
-                    {"role": "user", "content": augmented_prompt},
-                ],
-                temperature=0.3,  #lower temperature — faithful, not creative, answers
-                max_tokens=400,
-            )
+            with tracer.step(trace_id, "llm_generate", model=settings.openai_model):
+                completion = self._openai_client.create_completion(
+                    model=settings.openai_model,
+                    messages=[
+                        {"role": "system", "content": RAG_SYSTEM_PROMPT},
+                        {"role": "user", "content": augmented_prompt},
+                    ],
+                    temperature=0.3,  #lower temperature — faithful, not creative, answers
+                    max_tokens=400,
+                )
         except OpenAIError as e:
             raise e
         
@@ -108,7 +119,8 @@ class RagService:
             'retrieved_chunks': retrieved_chunks,
             'model': completion.model,
             'prompt_tokens': usage.prompt_tokens,
-            'completion_tokens': usage.completion_tokens
+            'completion_tokens': usage.completion_tokens,
+            "trace_id": trace_id
         }
         
 

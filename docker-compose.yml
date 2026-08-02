@@ -3,6 +3,8 @@ services:
     build: .
     ports:
       - "8000:8000"
+    volumes:
+      - ./usage.db:/code/usage.db
     environment:
       # Overrides the .env default of "localhost" — inside Docker Compose's
       # network, containers reach each other by SERVICE NAME, not localhost.

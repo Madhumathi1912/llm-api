@@ -9,6 +9,8 @@ from app.schemas.rag_model import (
 )
 from app.services.rag_service import rag_service
 from app.services.text_extractor import UnsupportedFileTypeError
+from app.services.moderation_client import ContentFlaggedError
+from app.services.tracer import tracer
 
 router = APIRouter()
 
@@ -53,6 +55,16 @@ async def ask(request: RagQueryRequest):
     """
     try:
         result = rag_service.ask(request.question, request.top_k)
+    except ContentFlaggedError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except OpenAIError as exc:
         raise HTTPException(status_code=502, detail=f"LLM provider error: {str(exc)}")
     return RagQueryResponse(**result)
+
+
+@router.get("/trace/{trace_id}")
+async def get_trace(trace_id: str):
+    """Returns the step-by-step timing breakdown for a given trace_id."""
+    steps = tracer.get_trace(trace_id)
+    total_ms = sum(s["duration_ms"] for s in steps)
+    return {"trace_id": trace_id, "total_duration_ms": round(total_ms, 2), "steps": steps}

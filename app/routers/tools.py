@@ -3,6 +3,7 @@ from openai import OpenAIError
 
 from app.schemas.tool_model import ToolChatRequest, ToolChatResponse
 from app.services.tool_calling_service import tool_calling_service
+from app.services.moderation_client import ContentFlaggedError
 
 router = APIRouter()
 
@@ -18,6 +19,8 @@ async def chat_with_tools(request: ToolChatRequest):
     """
     try:
         result = tool_calling_service.ask(request.prompt)
+    except ContentFlaggedError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except OpenAIError as e:
         raise HTTPException(status_code=502, detail=f"LLM provider error: {str(e)}")
 

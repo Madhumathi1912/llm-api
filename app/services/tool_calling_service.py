@@ -6,6 +6,7 @@ from app.config import settings
 from app.services.openai_client import OpenAIClient, openai_client
 from app.services.order_service import OrderService, order_service
 from app.services.cost_logger import CostLogger, cost_logger
+from app.services.moderation_client import moderation_client
 
 SYSTEM_PROMPT = "You're a helpful customer support assistant."
 
@@ -75,6 +76,7 @@ class ToolCallingService:
         If the model doesn't need any tool for this prompt, it just
         answers directly in step 1 — both paths are handled.
         """
+        moderation_client.check(prompt)
         messages = [
             {'role': 'system', 'content': SYSTEM_PROMPT},
             {'role': 'user', 'content': prompt},

@@ -27,3 +27,4 @@ class RagQueryResponse(BaseModel):
     model: str
     prompt_tokens: int
     completion_tokens: int
+    trace_id: str

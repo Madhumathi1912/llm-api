@@ -8,6 +8,7 @@ from app.schemas.models import (
 )
 from app.services.llm_service import LLMService
 from app.services.cost_logger import budget_enforcer, BudgetExceededError
+from app.services.moderation_client import ContentFlaggedError
 
 router = APIRouter()
 
@@ -53,6 +54,8 @@ async def chat_conversation(request: ConversationChatRequest):
     """
     try:
         result = LLMService.ask_with_memory(request.prompt, request.session_id)
+    except ContentFlaggedError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except BudgetExceededError as e:
         raise HTTPException(status_code=429, detail=str(e))
     except OpenAIError as e:
